@@ -14,3 +14,4 @@ rm *.log
 
 echo "Cleanup complete."
 
+mkdir data

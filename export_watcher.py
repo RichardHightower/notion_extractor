@@ -18,30 +18,80 @@ logging.basicConfig(
     ]
 )
 
+
 class FileProcessor:
-    def __init__(self, data_dir="data", output_dir="output"):
+    def __init__(self, data_dir="data", flat_output_dir="output/flat", files_output_dir="output/files"):
         self.cwd = os.getcwd()
         self.data_dir = os.path.join(self.cwd, data_dir)
-        self.output_dir = os.path.join(self.cwd, output_dir)
+        self.flat_output_dir = os.path.join(self.cwd, flat_output_dir)
+        self.files_output_dir = os.path.join(self.cwd, files_output_dir)
         self.filename_mapping = {}  # Dictionary to store original and new filenames
-        self.current_output_path = None  # Track the current output path
+        self.setup_output_directories()
 
-    def setup_output_directory(self, top_level_folder):
-        """Create top-level output directory if it doesn't exist."""
+    def setup_output_directories(self):
+        """Create output directories if they don't exist."""
         try:
-            output_path = os.path.join(self.output_dir, top_level_folder)
-            os.makedirs(output_path, exist_ok=True)
-            logging.info(f"Output directory ensured at: {output_path}")
-            self.current_output_path = output_path  # Store the current output path
-            return output_path
+            os.makedirs(self.flat_output_dir, exist_ok=True)
+            os.makedirs(self.files_output_dir, exist_ok=True)
+            logging.info(f"Output directories ensured at: {self.flat_output_dir} and {self.files_output_dir}")
         except Exception as e:
-            logging.error(f"Failed to create output directory: {e}")
+            logging.error(f"Failed to create output directories: {e}")
+            raise
+
+    def extract_title_from_content(self, content):
+        """Extract title from markdown content."""
+        # Look for # Title or # Header pattern
+        title_match = re.search(r'^#\s+(.+)$', content, re.MULTILINE)
+        if title_match:
+            return title_match.group(1).strip()
+
+        # If no # title, try first line
+        first_line = content.strip().split('\n')[0].strip()
+        if first_line:
+            # Remove any markdown heading characters
+            return re.sub(r'^#+\s*', '', first_line)
+
+        return None
+
+    def combine_files_with_titles(self):
+        """Combine all markdown files into one with title delimiters."""
+        try:
+            combined_content = []
+
+            # Walk through the data directory
+            for root, _, files in os.walk(self.data_dir):
+                for file in files:
+                    if file.endswith('.md'):
+                        file_path = os.path.join(root, file)
+                        try:
+                            with open(file_path, 'r', encoding='utf-8') as f:
+                                content = f.read()
+
+                                # Extract title from content
+                                title = self.extract_title_from_content(content)
+                                if not title:
+                                    # Use filename as fallback
+                                    title = os.path.splitext(file)[0]
+
+                                # Add delimited content
+                                combined_content.append(f"--- {title} ---\n{content.strip()}\n")
+
+                        except Exception as e:
+                            logging.error(f"Error processing file {file}: {e}")
+
+            # Write combined content to output file
+            output_file = os.path.join(self.files_output_dir, 'combined.md')
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(combined_content))
+
+            logging.info(f"Created combined file at: {output_file}")
+
+        except Exception as e:
+            logging.error(f"Error creating combined file: {e}")
             raise
 
     def clean_parent_folder_name(self, folder_name):
         """Clean parent folder name according to rules."""
-        # Remove date pattern (handle both space and underscore formats)
-        folder_name = re.sub(r'\d{2}[\s_]+\d{2}[\s_]+\d{4}[\s_]*-[\s_]*', '', folder_name)
         # Remove GUID pattern
         folder_name = re.sub(r'\s+[a-f0-9]{32}$', '', folder_name)
         # Strip any extra whitespace
@@ -54,9 +104,6 @@ class FileProcessor:
         """Clean filename according to rules."""
         # Remove .md extension temporarily
         base_name = filename[:-3] if filename.endswith('.md') else filename
-
-        # Remove date pattern (handle both space and underscore formats)
-        base_name = re.sub(r'\d{2}[\s_]+\d{2}[\s_]+\d{4}[\s_]*-[\s_]*', '', base_name)
 
         # Remove GUID pattern
         base_name = re.sub(r'\s+[a-f0-9]{32}$', '', base_name)
@@ -85,10 +132,7 @@ class FileProcessor:
     def save_mapping(self):
         """Save the filename mapping to a file."""
         try:
-            if not self.current_output_path:
-                logging.error("No current output path set for saving mapping.")
-                return
-            mapping_file_path = os.path.join(self.current_output_path, "mapping.txt")
+            mapping_file_path = os.path.join(self.flat_output_dir, "mapping.txt")
             with open(mapping_file_path, "w") as mapping_file:
                 for original, new in self.filename_mapping.items():
                     mapping_file.write(f"{original} -> {new}\n")
@@ -104,49 +148,35 @@ class FileProcessor:
                 logging.error(f"Data directory not found: {self.data_dir}")
                 raise FileNotFoundError(f"Data directory not found: {self.data_dir}")
 
-            for root, dirs, files in os.walk(self.data_dir):
-                # Get the relative path parts to determine where we are in the directory tree
+            # Process files for flat directory
+            for root, _, files in os.walk(self.data_dir):
                 path_parts = Path(root).relative_to(self.data_dir).parts
+                for file in files:
+                    if file.endswith('.md'):
+                        try:
+                            # Create the new filename
+                            new_filename = self.clean_filename(
+                                file,
+                                path_parts[-1] if len(path_parts) > 0 else None
+                            )
+                            src_path = os.path.join(root, file)
+                            dst_path = os.path.join(self.flat_output_dir, new_filename)
 
-                if len(path_parts) == 0:
-                    # We are at the root level of the data directory
-                    for dir_name in dirs:
-                        # Clean the root folder name to create a top-level output folder
-                        cleaned_root_folder = self.clean_parent_folder_name(dir_name)
-                        self.setup_output_directory(cleaned_root_folder)
-                else:
-                    # We are processing a subdirectory or files within it
-                    parent_folder_name = path_parts[0]
-                    cleaned_parent_folder_name = self.clean_parent_folder_name(parent_folder_name)
-                    output_path = os.path.join(self.output_dir, cleaned_parent_folder_name)
+                            # Track the original and new filenames
+                            self.filename_mapping[file] = new_filename
 
-                    for file in files:
-                        if file.endswith('.md'):
-                            try:
-                                # Create the new filename
-                                new_filename = self.clean_filename(file, path_parts[-1] if len(path_parts) > 1 else None)
-                                src_path = os.path.join(root, file)
-                                dst_path = os.path.join(output_path, new_filename)
+                            # Copy file and preserve modification time
+                            shutil.copy2(src_path, dst_path)
+                            logging.info(f"Processed: {file} -> {new_filename}")
 
-                                # Track the original and new filenames
-                                self.filename_mapping[file] = new_filename
-
-                                # Check if destination file already exists
-                                if os.path.exists(dst_path):
-                                    logging.warning(f"File already exists, skipping: {dst_path}")
-                                    continue
-
-                                # Copy file and preserve modification time
-                                shutil.copy2(src_path, dst_path)
-                                logging.info(f"Processed: {file} -> {new_filename}")
-
-                            except PermissionError as e:
-                                logging.error(f"Permission error processing file {file}: {e}")
-                            except Exception as e:
-                                logging.error(f"Error processing file {file}: {e}")
+                        except Exception as e:
+                            logging.error(f"Error processing file {file}: {e}")
 
             # Save the filename mapping
             self.save_mapping()
+
+            # Create combined file
+            self.combine_files_with_titles()
 
         except Exception as e:
             logging.error(f"Error during file processing: {e}")
@@ -154,10 +184,7 @@ class FileProcessor:
 
     def read_mapping(self):
         """Read the filename mapping from the mapping file."""
-        if not self.current_output_path:
-            logging.error("No current output path set for reading mapping.")
-            return {}
-        mapping_file_path = os.path.join(self.current_output_path, "mapping.txt")
+        mapping_file_path = os.path.join(self.flat_output_dir, "mapping.txt")
         mapping = {}
         try:
             with open(mapping_file_path, "r") as mapping_file:
@@ -170,40 +197,71 @@ class FileProcessor:
             raise
         return mapping
 
+    def delete_mapping_file(self):
+        """Delete the mapping file after processing is complete."""
+        try:
+            mapping_file_path = os.path.join(self.flat_output_dir, "mapping.txt")
+            if os.path.exists(mapping_file_path):
+                os.remove(mapping_file_path)
+                logging.info(f"Deleted mapping file: {mapping_file_path}")
+            else:
+                logging.warning(f"Mapping file not found at: {mapping_file_path}")
+        except Exception as e:
+            logging.error(f"Failed to delete mapping file: {e}")
+            raise
+
     def process_links(self):
-        """Process links in all output markdown files and rewrite them with correct filenames."""
+        """Process links in all output markdown files."""
         try:
             mapping = self.read_mapping()
             if not mapping:
                 logging.error("No mapping available to process links.")
                 return
-            for root, _, files in os.walk(self.current_output_path):
-                for file in files:
-                    if file.endswith('.md'):
-                        file_path = os.path.join(root, file)
-                        new_lines = []
-                        with open(file_path, 'r') as md_file:
-                            for line in md_file:
-                                # Extract links from the line (assuming markdown link format)
-                                matches = re.findall(r'\[.*?\]\((.*?)\)', line)
-                                for match in matches:
-                                    # Decode the URL
-                                    decoded_link = urllib.parse.unquote(match)
-                                    filename = os.path.basename(decoded_link)
-                                    if filename in mapping:
-                                        # Replace with the new filename from mapping
-                                        new_filename = mapping[filename]
-                                        line = line.replace(match, new_filename)
-                                new_lines.append(line)
 
-                        # Write updated lines back to the file
-                        with open(file_path, 'w') as md_file:
-                            md_file.writelines(new_lines)
+            # Process links in flat directory
+            for file in os.listdir(self.flat_output_dir):
+                if file.endswith('.md'):
+                    self.update_links_in_file(os.path.join(self.flat_output_dir, file), mapping)
 
-                        logging.info(f"Updated links in: {file_path}")
+            # Process links in combined file
+            combined_file = os.path.join(self.files_output_dir, 'combined.md')
+            if os.path.exists(combined_file):
+                self.update_links_in_file(combined_file, mapping)
+
+            # Delete the mapping file after processing is complete
+            self.delete_mapping_file()
+
         except Exception as e:
             logging.error(f"Error processing links: {e}")
             raise
+
+    def update_links_in_file(self, file_path, mapping):
+        """Update links in a single file."""
+        try:
+            new_lines = []
+            with open(file_path, 'r') as md_file:
+                for line in md_file:
+                    # Extract links from the line
+                    matches = re.findall(r'\[.*?\]\((.*?)\)', line)
+                    for match in matches:
+                        # Decode the URL
+                        decoded_link = urllib.parse.unquote(match)
+                        filename = os.path.basename(decoded_link)
+                        if filename in mapping:
+                            # Replace with the new filename from mapping
+                            new_filename = mapping[filename]
+                            line = line.replace(match, new_filename)
+                    new_lines.append(line)
+
+            # Write updated lines back to the file
+            with open(file_path, 'w') as md_file:
+                md_file.writelines(new_lines)
+
+            logging.info(f"Updated links in: {file_path}")
+        except Exception as e:
+            logging.error(f"Error updating links in {file_path}: {e}")
+            raise
+
 
 class Watcher:
     def __init__(self, directory_to_watch, processor):
@@ -222,6 +280,7 @@ class Watcher:
             self.observer.stop()
         self.observer.join()
 
+
 class Handler(FileSystemEventHandler):
     def __init__(self, processor):
         self.processor = processor
@@ -232,6 +291,7 @@ class Handler(FileSystemEventHandler):
         # Run the processing when changes are detected
         self.processor.process_files()
         self.processor.process_links()
+
 
 def main():
     try:
@@ -248,6 +308,7 @@ def main():
         logging.error(f"Program failed: {e}")
         return 1
     return 0
+
 
 if __name__ == "__main__":
     exit(main())
